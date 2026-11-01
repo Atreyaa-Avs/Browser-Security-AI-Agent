@@ -1,16 +1,14 @@
 import React from 'react';
 import { createRoot } from 'react-dom/client';
 import { BrowserRouter, Routes, Route } from 'react-router-dom';
-import Landing from './pages/Landing';
-import Content from './pages/Content';
-import Auth from './pages/Auth';
+import Dashboard from './pages/Dashboard';
+import Investigation from './pages/Investigation';
 
 createRoot(document.getElementById('root')!).render(
   <BrowserRouter>
     <Routes>
-      <Route path="/" element={<Landing />} />
-      <Route path="/content" element={<Content />} />
-      <Route path="/auth" element={<Auth />} />
+      <Route path="/" element={<Dashboard />} />
+      <Route path="/investigation/:id" element={<Investigation />} />
     </Routes>
   </BrowserRouter>
 );

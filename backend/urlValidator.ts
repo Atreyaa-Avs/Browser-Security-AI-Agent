@@ -41,7 +41,7 @@ function isIpInCidr(ip: string, cidr: string): boolean {
   const ipNum = ipToNumber(ip);
   const netNum = ipToNumber(network);
   if (ipNum === null || netNum === null) return false;
-  const mask = (0xFFFFFFFFn << (32 - prefix)) & 0xFFFFFFFFn;
+  const mask = (0xFFFFFFFFn << BigInt(32 - prefix)) & 0xFFFFFFFFn;
   return (ipNum & mask) === (netNum & mask);
 }
 
