@@ -7,6 +7,7 @@ import cors from "cors";
 import { createExpressMiddleware } from "@trpc/server/adapters/express";
 import { spawn } from "child_process";
 import path from "path";
+import { WebSocketServer, WebSocket } from "ws";
 import { getDb, newId, now } from "./database";
 import { validateUrl } from "./urlValidator";
 import { EventBus } from "./eventBus";
@@ -57,7 +58,7 @@ async function runPipeline(invId: string, url: string, config: any) {
     await stage("browser_investigator", async () => {
       await emit(invId, "browser.session_started", { provider: "local-playwright" });
       return new Promise((resolve, reject) => {
-        const child = spawn("npx", ["tsx", "agent.ts", url], { cwd: path.join(__dirname, "..", "browser-agent"), shell: true });
+        const child = spawn("npx", ["tsx", "agent.ts", url, invId], { cwd: path.join(__dirname, "..", "browser-agent"), shell: true });
         let out = "";
         child.stdout.on("data", (d) => { out += d.toString(); });
         child.stderr.on("data", (d) => { out += d.toString(); });
@@ -103,7 +104,6 @@ const appRouter = t.router({
     db.prepare("INSERT INTO investigations (id, url, normalized_url, hostname, config, status, stage, created_at, updated_at) VALUES (?,?,?,?,?,?,?,?,?)")
       .run(id, input.url, v.normalizedUrl, v.hostname, JSON.stringify(input), "queued", "queued", now(), now());
     await emit(id, "investigation.created", { url: input.url });
-    // run async
     runPipeline(id, input.url, input).catch(() => {});
     return { investigationId: id };
   }),
@@ -163,7 +163,6 @@ io.attach(server, { cors: { origin: "*" } });
 app.get("/", (_req, res) => res.json({ status: "ok" }));
 app.get("/health", (_req, res) => res.json({ ok: true }));
 
-// socket.io
 io.on("connection", (socket) => {
   socket.on("subscribe", (invId: string) => eventBus.subscribe(socket, invId));
   socket.on("unsubscribe", (invId: string) => eventBus.unsubscribe(socket, invId));
@@ -171,7 +170,6 @@ io.on("connection", (socket) => {
 
 app.use("/trpc", createExpressMiddleware({ router: appRouter }));
 
-// SSE endpoint
 app.get("/events/:id", (req, res) => {
   const invId = req.params.id;
   res.setHeader("Content-Type", "text/event-stream");
@@ -181,10 +179,98 @@ app.get("/events/:id", (req, res) => {
   const send = (e: any) => res.write(`data: ${JSON.stringify(e)}\n\n`);
   const interval = setInterval(async () => {
     const evs = await eventBus.getEventsSince(invId, 0, 1000);
-    // heartbeat
     res.write(": heartbeat\n\n");
   }, 15000);
   req.on("close", () => clearInterval(interval));
+});
+
+const wss = new WebSocketServer({ server, path: "/browser-logs" });
+const browserAgentConnections = new Map<string, Set<WebSocket>>();
+const frontendLogConnections = new Map<string, Set<WebSocket>>();
+const investigationLogs = new Map<string, any[]>();
+
+wss.on("connection", (ws, req) => {
+  const url = new URL(req.url || "", `http://${req.headers.host}`);
+  const type = url.searchParams.get("type");
+  const invId = url.searchParams.get("id");
+
+  if (type === "agent" && invId) {
+    if (!browserAgentConnections.has(invId)) {
+      browserAgentConnections.set(invId, new Set());
+    }
+    browserAgentConnections.get(invId)!.add(ws);
+    
+    ws.on("message", (data) => {
+      try {
+        const msg = JSON.parse(data.toString());
+        const logEntry = {
+          id: newId(),
+          timestamp: Date.now(),
+          type: msg.type || "log",
+          message: msg.message || data.toString(),
+          ...msg
+        };
+        
+        if (!investigationLogs.has(invId)) {
+          investigationLogs.set(invId, []);
+        }
+        investigationLogs.get(invId)!.push(logEntry);
+        
+        if (frontendLogConnections.has(invId)) {
+          for (const client of frontendLogConnections.get(invId)!) {
+            if (client.readyState === WebSocket.OPEN) {
+              client.send(JSON.stringify(logEntry));
+            }
+          }
+        }
+      } catch (e) {
+        const logEntry = {
+          id: newId(),
+          timestamp: Date.now(),
+          type: "log",
+          message: data.toString()
+        };
+        if (!investigationLogs.has(invId)) {
+          investigationLogs.set(invId, []);
+        }
+        investigationLogs.get(invId)!.push(logEntry);
+        
+        if (frontendLogConnections.has(invId)) {
+          for (const client of frontendLogConnections.get(invId)!) {
+            if (client.readyState === WebSocket.OPEN) {
+              client.send(JSON.stringify(logEntry));
+            }
+          }
+        }
+      }
+    });
+    
+    ws.on("close", () => {
+      browserAgentConnections.get(invId)?.delete(ws);
+    });
+  } else if (type === "frontend" && invId) {
+    if (!frontendLogConnections.has(invId)) {
+      frontendLogConnections.set(invId, new Set());
+    }
+    frontendLogConnections.get(invId)!.add(ws);
+    
+    if (investigationLogs.has(invId)) {
+      for (const log of investigationLogs.get(invId)!) {
+        if (ws.readyState === WebSocket.OPEN) {
+          ws.send(JSON.stringify(log));
+        }
+      }
+    }
+    
+    ws.on("close", () => {
+      frontendLogConnections.get(invId)?.delete(ws);
+    });
+  }
+});
+
+app.get("/logs/:id", (req, res) => {
+  const invId = req.params.id;
+  res.json(investigationLogs.get(invId) || []);
 });
 
 const PORT = process.env.PORT || 4000;
