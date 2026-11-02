@@ -8,6 +8,47 @@ interface ScanLog {
   data?: any;
 }
 
+interface ObservedElement {
+  id: string;
+  tagName: string;
+  type?: string;
+  name?: string;
+  selector: string;
+  text: string;
+  role?: string;
+  placeholder?: string;
+  isInteractive: boolean;
+  isAuthRelated?: boolean;
+}
+
+interface ExtractedFormData {
+  action: string;
+  method: string;
+  selector: string;
+  inputs: {
+    name: string;
+    type: string;
+    value?: string;
+    placeholder?: string;
+    required?: boolean;
+  }[];
+}
+
+interface StagehandOutput {
+  title: string;
+  url: string;
+  status: number;
+  screenshot?: string;
+  interactiveElements: ObservedElement[];
+  forms: ExtractedFormData[];
+  links: { href: string; text: string }[];
+  scripts: string[];
+  metaTags: Record<string, string>;
+  cookies: any[];
+  headers: Record<string, string>;
+  exploredPages?: { url: string; title: string; linksCount: number; formsCount: number }[];
+}
+
 interface EnrichedVulnerability {
   id: string;
   type: string;
@@ -61,18 +102,20 @@ const WS_URL = 'ws://localhost:4001';
 export default function Demo() {
   const navigate = useNavigate();
   const [targetUrl, setTargetUrl] = useState('http://localhost:4001/test-lab');
+  const [scanMode, setScanMode] = useState<'stagehand-only' | 'full'>('stagehand-only');
   const [maxPages, setMaxPages] = useState<number>(8);
   const [maxDepth, setMaxDepth] = useState<number>(2);
 
   const [scanId, setScanId] = useState<string | null>(null);
   const [status, setStatus] = useState<'idle' | 'running' | 'completed' | 'failed' | 'aborted'>('idle');
-  const [step, setStep] = useState<string>('Ready to scan');
+  const [step, setStep] = useState<string>('Ready to test');
   const [progress, setProgress] = useState<number>(0);
   const [logs, setLogs] = useState<ScanLog[]>([]);
+  const [stagehandOutput, setStagehandOutput] = useState<StagehandOutput | null>(null);
   const [findings, setFindings] = useState<EnrichedVulnerability[]>([]);
   const [endpoints, setEndpoints] = useState<any[]>([]);
   const [report, setReport] = useState<ScanReport | null>(null);
-  const [activeTab, setActiveTab] = useState<'overview' | 'vulns' | 'surfaces' | 'logs'>('overview');
+  const [activeTab, setActiveTab] = useState<'stagehand' | 'overview' | 'vulns' | 'surfaces' | 'logs'>('stagehand');
   const [severityFilter, setSeverityFilter] = useState<string>('all');
   const [detectorFilter, setDetectorFilter] = useState<string>('all');
   const [backendOnline, setBackendOnline] = useState<boolean | null>(null);
@@ -109,6 +152,7 @@ export default function Demo() {
         setStatus(data.status);
         setStep(data.step);
         setProgress(data.progress);
+        if (data.stagehandOutput) setStagehandOutput(data.stagehandOutput);
         if (data.findings) setFindings(data.findings);
         if (data.report) setReport(data.report);
         if (data.logs && data.logs.length > logs.length) setLogs(data.logs);
@@ -134,13 +178,19 @@ export default function Demo() {
           const msg = JSON.parse(event.data);
           if (msg.type === 'scan.log' && msg.log) {
             setLogs((prev) => [...prev, msg.log]);
-          } else if (msg.type === 'scan.completed' && msg.report) {
-            setReport(msg.report);
+          } else if (msg.type === 'scan.completed') {
             setStatus('completed');
             setProgress(100);
-            setStep('Scan completed');
-            if (msg.report.findings) setFindings(msg.report.findings);
-            if (msg.report.endpoints) setEndpoints(msg.report.endpoints);
+            setStep('Completed successfully');
+            if (msg.stagehandOutput) {
+              setStagehandOutput(msg.stagehandOutput);
+              setActiveTab('stagehand');
+            }
+            if (msg.report) {
+              setReport(msg.report);
+              if (msg.report.findings) setFindings(msg.report.findings);
+              if (msg.report.endpoints) setEndpoints(msg.report.endpoints);
+            }
           } else if (msg.type === 'scan.failed') {
             setStatus('failed');
             setStep(`Failed: ${msg.error || 'Unknown error'}`);
@@ -154,22 +204,28 @@ export default function Demo() {
     } catch {}
   };
 
-  const handleStartScan = async () => {
-    if (!targetUrl) return;
+  const handleStartScan = async (overrideMode?: 'stagehand-only' | 'full', overrideUrl?: string) => {
+    const urlToUse = overrideUrl || targetUrl;
+    const modeToUse = overrideMode || scanMode;
+    if (!urlToUse) return;
 
     setStatus('running');
     setProgress(5);
-    setStep('Initializing Stagehand browser and Groq AI orchestrator...');
+    setStep(`Initializing Stagehand Browser Agent (${modeToUse === 'stagehand-only' ? 'Stagehand Only Mode' : 'Full Audit Mode'})...`);
     setLogs([]);
+    setStagehandOutput(null);
     setFindings([]);
     setEndpoints([]);
     setReport(null);
+
+    // Switch tab to Stagehand output
+    setActiveTab(modeToUse === 'stagehand-only' ? 'stagehand' : 'logs');
 
     try {
       const res = await fetch(`${BACKEND_URL}/api/scan/start`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ url: targetUrl, maxPages, maxDepth })
+        body: JSON.stringify({ url: urlToUse, maxPages, maxDepth, mode: modeToUse })
       });
 
       const data = await res.json();
@@ -301,7 +357,7 @@ ${report.findings
                 </span>
               </div>
               <p style={{ margin: 0, fontSize: '12px', color: '#64748b' }}>
-                Autonomous exploration · 5 Vulnerability Detectors · Groq AI Reasoning
+                Stagehand Primitives: goto() · observe() · act() · extract() + 5 Vulnerability Detectors
               </p>
             </div>
           </div>
@@ -317,40 +373,83 @@ ${report.findings
         </div>
       </header>
 
-      <main style={{ maxWidth: '1400px', margin: '0 auto', padding: '28px 24px' }}>
+      <main style={{ maxWidth: '1400px', margin: '0 auto', padding: '24px 24px' }}>
         {/* URL Target & Scan Controller Card */}
         <section style={{ background: '#0f172a', border: '1px solid #1e293b', borderRadius: '12px', padding: '24px', marginBottom: '24px', boxShadow: '0 10px 25px -5px rgba(0, 0, 0, 0.5)' }}>
           <div style={{ display: 'flex', flexDirection: 'column', gap: '16px' }}>
-            <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
-              <label style={{ fontSize: '14px', fontWeight: 600, color: '#cbd5e1' }}>
-                Target Web Application URL:
-              </label>
+            
+            {/* Mode Selector Toggle */}
+            <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', flexWrap: 'wrap', gap: '12px' }}>
+              <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
+                <span style={{ fontSize: '13px', fontWeight: 600, color: '#94a3b8' }}>Execution Mode:</span>
+                <div style={{ display: 'flex', background: '#090d16', padding: '4px', borderRadius: '8px', border: '1px solid #1e293b' }}>
+                  <button
+                    type="button"
+                    onClick={() => setScanMode('stagehand-only')}
+                    style={{
+                      padding: '6px 14px',
+                      borderRadius: '6px',
+                      border: 'none',
+                      fontSize: '13px',
+                      fontWeight: 600,
+                      cursor: 'pointer',
+                      background: scanMode === 'stagehand-only' ? 'linear-gradient(90deg, #0284c7, #38bdf8)' : 'transparent',
+                      color: scanMode === 'stagehand-only' ? '#ffffff' : '#94a3b8',
+                      transition: 'all 0.2s ease'
+                    }}
+                  >
+                    ⚡ Only Stagehand (Explore & Extract)
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => setScanMode('full')}
+                    style={{
+                      padding: '6px 14px',
+                      borderRadius: '6px',
+                      border: 'none',
+                      fontSize: '13px',
+                      fontWeight: 600,
+                      cursor: 'pointer',
+                      background: scanMode === 'full' ? 'linear-gradient(90deg, #7c3aed, #a855f7)' : 'transparent',
+                      color: scanMode === 'full' ? '#ffffff' : '#94a3b8',
+                      transition: 'all 0.2s ease'
+                    }}
+                  >
+                    🛡️ Full Audit (Stagehand + 5 Detectors + Groq)
+                  </button>
+                </div>
+              </div>
+
               <div style={{ display: 'flex', gap: '8px', alignItems: 'center' }}>
-                <span style={{ fontSize: '12px', color: '#64748b' }}>Presets:</span>
+                <span style={{ fontSize: '12px', color: '#64748b' }}>Quick Presets:</span>
                 <button
                   type="button"
-                  onClick={() => setTargetUrl('http://localhost:4001/test-lab')}
-                  style={{ background: '#1e293b', border: '1px solid #38bdf8', color: '#38bdf8', fontSize: '12px', padding: '3px 10px', borderRadius: '6px', cursor: 'pointer', fontWeight: 600 }}
+                  onClick={() => {
+                    setTargetUrl('http://localhost:4001/test-lab');
+                    handleStartScan('stagehand-only', 'http://localhost:4001/test-lab');
+                  }}
+                  style={{ background: '#1e293b', border: '1px solid #38bdf8', color: '#38bdf8', fontSize: '12px', padding: '4px 12px', borderRadius: '6px', cursor: 'pointer', fontWeight: 600 }}
                 >
-                  ⚡ Local Vuln Lab
+                  ⚡ Test Stagehand Now (Local Lab)
                 </button>
                 <button
                   type="button"
                   onClick={() => setTargetUrl('http://testphp.vulnweb.com')}
-                  style={{ background: '#1e293b', border: '1px solid #334155', color: '#94a3b8', fontSize: '12px', padding: '3px 10px', borderRadius: '6px', cursor: 'pointer' }}
+                  style={{ background: '#1e293b', border: '1px solid #334155', color: '#94a3b8', fontSize: '12px', padding: '4px 10px', borderRadius: '6px', cursor: 'pointer' }}
                 >
                   Acunetix VulnWeb
                 </button>
                 <button
                   type="button"
                   onClick={() => setTargetUrl('http://zero.webappsecurity.com')}
-                  style={{ background: '#1e293b', border: '1px solid #334155', color: '#94a3b8', fontSize: '12px', padding: '3px 10px', borderRadius: '6px', cursor: 'pointer' }}
+                  style={{ background: '#1e293b', border: '1px solid #334155', color: '#94a3b8', fontSize: '12px', padding: '4px 10px', borderRadius: '6px', cursor: 'pointer' }}
                 >
                   Zero WebApp
                 </button>
               </div>
             </div>
 
+            {/* Input & Action Row */}
             <div style={{ display: 'flex', gap: '12px', flexWrap: 'wrap' }}>
               <input
                 type="text"
@@ -362,44 +461,48 @@ ${report.findings
               />
 
               <div style={{ display: 'flex', gap: '12px', alignItems: 'center' }}>
-                <div style={{ display: 'flex', alignItems: 'center', gap: '6px', fontSize: '12px', color: '#94a3b8' }}>
-                  <span>Max Pages:</span>
-                  <select
-                    value={maxPages}
-                    onChange={(e) => setMaxPages(Number(e.target.value))}
-                    disabled={status === 'running'}
-                    style={{ background: '#1e293b', border: '1px solid #334155', color: '#f8fafc', padding: '8px 10px', borderRadius: '6px' }}
-                  >
-                    <option value={5}>5 pages</option>
-                    <option value={8}>8 pages</option>
-                    <option value={15}>15 pages</option>
-                  </select>
-                </div>
+                {scanMode === 'full' && (
+                  <div style={{ display: 'flex', alignItems: 'center', gap: '6px', fontSize: '12px', color: '#94a3b8' }}>
+                    <span>Max Pages:</span>
+                    <select
+                      value={maxPages}
+                      onChange={(e) => setMaxPages(Number(e.target.value))}
+                      disabled={status === 'running'}
+                      style={{ background: '#1e293b', border: '1px solid #334155', color: '#f8fafc', padding: '8px 10px', borderRadius: '6px' }}
+                    >
+                      <option value={5}>5 pages</option>
+                      <option value={8}>8 pages</option>
+                      <option value={15}>15 pages</option>
+                    </select>
+                  </div>
+                )}
 
                 {status === 'running' ? (
                   <button
                     onClick={handleStopScan}
                     style={{ padding: '12px 24px', background: '#dc2626', color: 'white', border: 'none', borderRadius: '8px', cursor: 'pointer', fontWeight: 600, fontSize: '14px' }}
                   >
-                    Abort Scan
+                    Abort Execution
                   </button>
                 ) : (
                   <button
-                    onClick={handleStartScan}
+                    onClick={() => handleStartScan()}
                     disabled={!targetUrl}
                     style={{
                       padding: '12px 28px',
-                      background: 'linear-gradient(90deg, #2563eb 0%, #7c3aed 100%)',
+                      background: scanMode === 'stagehand-only' 
+                        ? 'linear-gradient(90deg, #0284c7 0%, #38bdf8 100%)'
+                        : 'linear-gradient(90deg, #2563eb 0%, #7c3aed 100%)',
                       color: 'white',
                       border: 'none',
                       borderRadius: '8px',
                       cursor: 'pointer',
                       fontWeight: 600,
                       fontSize: '14px',
-                      boxShadow: '0 4px 14px rgba(59, 130, 246, 0.4)'
+                      boxShadow: '0 4px 14px rgba(56, 189, 248, 0.3)'
                     }}
                   >
-                    Launch Stagehand Scan
+                    {scanMode === 'stagehand-only' ? '⚡ Run Stagehand Exploration' : '🛡️ Launch Full Audit'}
                   </button>
                 )}
               </div>
@@ -425,7 +528,27 @@ ${report.findings
         </section>
 
         {/* Navigation Tabs */}
-        <div style={{ display: 'flex', gap: '8px', borderBottom: '1px solid #1e293b', marginBottom: '24px' }}>
+        <div style={{ display: 'flex', gap: '8px', borderBottom: '1px solid #1e293b', marginBottom: '24px', flexWrap: 'wrap' }}>
+          <button
+            onClick={() => setActiveTab('stagehand')}
+            style={{
+              padding: '10px 18px',
+              background: activeTab === 'stagehand' ? '#1e293b' : 'transparent',
+              color: activeTab === 'stagehand' ? '#38bdf8' : '#94a3b8',
+              border: 'none',
+              borderBottom: activeTab === 'stagehand' ? '2px solid #38bdf8' : '2px solid transparent',
+              cursor: 'pointer',
+              fontWeight: 600,
+              fontSize: '14px',
+              display: 'flex',
+              alignItems: 'center',
+              gap: '6px'
+            }}
+          >
+            <span>⚡ Stagehand Output</span>
+            {stagehandOutput && <span style={{ background: '#0284c7', color: '#fff', fontSize: '10px', padding: '1px 6px', borderRadius: '8px' }}>Active</span>}
+          </button>
+
           <button
             onClick={() => setActiveTab('overview')}
             style={{
@@ -441,6 +564,7 @@ ${report.findings
           >
             Audit Summary & Score
           </button>
+
           <button
             onClick={() => setActiveTab('vulns')}
             style={{
@@ -456,6 +580,7 @@ ${report.findings
           >
             Vulnerabilities ({findings.length})
           </button>
+
           <button
             onClick={() => setActiveTab('surfaces')}
             style={{
@@ -469,8 +594,9 @@ ${report.findings
               fontSize: '14px'
             }}
           >
-            Attack Surfaces & Endpoints ({endpoints.length || findings.length})
+            Attack Surfaces & Endpoints ({endpoints.length || stagehandOutput?.links.length || 0})
           </button>
+
           <button
             onClick={() => setActiveTab('logs')}
             style={{
@@ -487,6 +613,188 @@ ${report.findings
             Stagehand Live Console ({logs.length})
           </button>
         </div>
+
+        {/* Tab 0: Stagehand Dedicated Live Output */}
+        {activeTab === 'stagehand' && (
+          <div>
+            {stagehandOutput ? (
+              <div style={{ display: 'flex', flexDirection: 'column', gap: '24px' }}>
+                {/* Header Status Card */}
+                <div style={{ background: '#0f172a', border: '1px solid #1e293b', borderRadius: '12px', padding: '20px', display: 'flex', justifyContent: 'space-between', alignItems: 'center', flexWrap: 'wrap', gap: '16px' }}>
+                  <div>
+                    <div style={{ display: 'flex', alignItems: 'center', gap: '8px', marginBottom: '4px' }}>
+                      <span style={{ fontSize: '11px', background: 'rgba(16, 185, 129, 0.2)', color: '#10b981', padding: '2px 8px', borderRadius: '4px', fontWeight: 700 }}>
+                        HTTP {stagehandOutput.status}
+                      </span>
+                      <h3 style={{ margin: 0, fontSize: '18px', color: '#f8fafc' }}>{stagehandOutput.title}</h3>
+                    </div>
+                    <div style={{ fontFamily: 'monospace', fontSize: '13px', color: '#38bdf8' }}>{stagehandOutput.url}</div>
+                  </div>
+
+                  <div style={{ display: 'flex', gap: '12px' }}>
+                    <div style={{ background: '#090d16', border: '1px solid #1e293b', borderRadius: '8px', padding: '8px 14px', textAlign: 'center' }}>
+                      <div style={{ fontSize: '11px', color: '#64748b' }}>OBSERVED ELEMENTS</div>
+                      <div style={{ fontSize: '18px', fontWeight: 700, color: '#38bdf8' }}>{stagehandOutput.interactiveElements?.length || 0}</div>
+                    </div>
+                    <div style={{ background: '#090d16', border: '1px solid #1e293b', borderRadius: '8px', padding: '8px 14px', textAlign: 'center' }}>
+                      <div style={{ fontSize: '11px', color: '#64748b' }}>DISCOVERED FORMS</div>
+                      <div style={{ fontSize: '18px', fontWeight: 700, color: '#818cf8' }}>{stagehandOutput.forms?.length || 0}</div>
+                    </div>
+                    <div style={{ background: '#090d16', border: '1px solid #1e293b', borderRadius: '8px', padding: '8px 14px', textAlign: 'center' }}>
+                      <div style={{ fontSize: '11px', color: '#64748b' }}>DISCOVERED LINKS</div>
+                      <div style={{ fontSize: '18px', fontWeight: 700, color: '#10b981' }}>{stagehandOutput.links?.length || 0}</div>
+                    </div>
+                    <div style={{ background: '#090d16', border: '1px solid #1e293b', borderRadius: '8px', padding: '8px 14px', textAlign: 'center' }}>
+                      <div style={{ fontSize: '11px', color: '#64748b' }}>COOKIES CAPTURED</div>
+                      <div style={{ fontSize: '18px', fontWeight: 700, color: '#f59e0b' }}>{stagehandOutput.cookies?.length || 0}</div>
+                    </div>
+                  </div>
+                </div>
+
+                {/* Grid: Screenshot & Explored Pages */}
+                <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(420px, 1fr))', gap: '20px' }}>
+                  {/* Screenshot Preview */}
+                  {stagehandOutput.screenshot && (
+                    <div style={{ background: '#0f172a', border: '1px solid #1e293b', borderRadius: '12px', padding: '20px' }}>
+                      <h4 style={{ margin: '0 0 12px 0', fontSize: '15px', color: '#f8fafc', display: 'flex', alignItems: 'center', gap: '8px' }}>
+                        <span>📸</span> Stagehand Headless Viewport Render
+                      </h4>
+                      <div style={{ border: '1px solid #334155', borderRadius: '8px', overflow: 'hidden', maxHeight: '360px' }}>
+                        <img src={stagehandOutput.screenshot} alt="Stagehand Viewport" style={{ width: '100%', height: 'auto', display: 'block' }} />
+                      </div>
+                    </div>
+                  )}
+
+                  {/* Exploration Breadcrumbs / Pages Visited */}
+                  <div style={{ background: '#0f172a', border: '1px solid #1e293b', borderRadius: '12px', padding: '20px' }}>
+                    <h4 style={{ margin: '0 0 12px 0', fontSize: '15px', color: '#f8fafc', display: 'flex', alignItems: 'center', gap: '8px' }}>
+                      <span>🧭</span> Stagehand goto() Exploration Trail
+                    </h4>
+                    <div style={{ display: 'flex', flexDirection: 'column', gap: '8px', maxHeight: '360px', overflowY: 'auto' }}>
+                      {(stagehandOutput.exploredPages || [{ url: stagehandOutput.url, title: stagehandOutput.title, linksCount: stagehandOutput.links.length, formsCount: stagehandOutput.forms.length }]).map((p, idx) => (
+                        <div key={idx} style={{ background: '#090d16', border: '1px solid #1e293b', borderRadius: '6px', padding: '10px 14px' }}>
+                          <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '4px' }}>
+                            <span style={{ fontSize: '13px', fontWeight: 600, color: '#e2e8f0' }}>{p.title || 'Page ' + (idx + 1)}</span>
+                            <span style={{ fontSize: '11px', color: '#64748b' }}>Step {idx + 1}</span>
+                          </div>
+                          <div style={{ fontSize: '12px', fontFamily: 'monospace', color: '#38bdf8', wordBreak: 'break-all' }}>{p.url}</div>
+                          <div style={{ display: 'flex', gap: '10px', marginTop: '6px', fontSize: '11px', color: '#94a3b8' }}>
+                            <span>{p.linksCount} links extracted</span> · 
+                            <span>{p.formsCount} forms extracted</span>
+                          </div>
+                        </div>
+                      ))}
+                    </div>
+                  </div>
+                </div>
+
+                {/* Observed Interactive Elements */}
+                <div style={{ background: '#0f172a', border: '1px solid #1e293b', borderRadius: '12px', padding: '20px' }}>
+                  <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '16px' }}>
+                    <h4 style={{ margin: 0, fontSize: '15px', color: '#f8fafc', display: 'flex', alignItems: 'center', gap: '8px' }}>
+                      <span>🔍</span> Interactive Elements Discovered via stagehand.observe()
+                    </h4>
+                    <span style={{ fontSize: '12px', color: '#64748b' }}>{stagehandOutput.interactiveElements?.length || 0} elements</span>
+                  </div>
+
+                  <div style={{ maxHeight: '300px', overflowY: 'auto' }}>
+                    <table style={{ width: '100%', borderCollapse: 'collapse', fontSize: '12.5px', textAlign: 'left' }}>
+                      <thead>
+                        <tr style={{ borderBottom: '1px solid #334155', color: '#94a3b8' }}>
+                          <th style={{ padding: '8px' }}>Tag / Type</th>
+                          <th style={{ padding: '8px' }}>Name / ID</th>
+                          <th style={{ padding: '8px' }}>Selector</th>
+                          <th style={{ padding: '8px' }}>Text / Label</th>
+                          <th style={{ padding: '8px' }}>Auth Workflow?</th>
+                        </tr>
+                      </thead>
+                      <tbody>
+                        {(stagehandOutput.interactiveElements || []).map((el, idx) => (
+                          <tr key={idx} style={{ borderBottom: '1px solid #1e293b' }}>
+                            <td style={{ padding: '8px', color: '#38bdf8', fontWeight: 600 }}>&lt;{el.tagName}&gt; {el.type ? `[type="${el.type}"]` : ''}</td>
+                            <td style={{ padding: '8px', color: '#cbd5e1' }}>{el.name || el.id || '—'}</td>
+                            <td style={{ padding: '8px', fontFamily: 'monospace', color: '#a5f3fc' }}>{el.selector}</td>
+                            <td style={{ padding: '8px', color: '#94a3b8' }}>{el.text || el.placeholder || '—'}</td>
+                            <td style={{ padding: '8px' }}>
+                              {el.isAuthRelated ? (
+                                <span style={{ background: 'rgba(239, 68, 68, 0.2)', color: '#ef4444', padding: '2px 6px', borderRadius: '4px', fontSize: '11px', fontWeight: 600 }}>
+                                  Auth
+                                </span>
+                              ) : (
+                                <span style={{ color: '#64748b' }}>No</span>
+                              )}
+                            </td>
+                          </tr>
+                        ))}
+                      </tbody>
+                    </table>
+                  </div>
+                </div>
+
+                {/* Discovered Forms */}
+                <div style={{ background: '#0f172a', border: '1px solid #1e293b', borderRadius: '12px', padding: '20px' }}>
+                  <h4 style={{ margin: '0 0 16px 0', fontSize: '15px', color: '#f8fafc', display: 'flex', alignItems: 'center', gap: '8px' }}>
+                    <span>📝</span> Forms Extracted via stagehand.extract()
+                  </h4>
+                  {stagehandOutput.forms?.length === 0 ? (
+                    <div style={{ color: '#64748b', fontSize: '13px' }}>No forms found on target page.</div>
+                  ) : (
+                    <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(320px, 1fr))', gap: '16px' }}>
+                      {stagehandOutput.forms?.map((form, fIdx) => (
+                        <div key={fIdx} style={{ background: '#090d16', border: '1px solid #1e293b', borderRadius: '8px', padding: '16px' }}>
+                          <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '8px' }}>
+                            <span style={{ fontSize: '12px', fontWeight: 700, background: '#1e293b', padding: '2px 8px', borderRadius: '4px', color: form.method === 'POST' ? '#f59e0b' : '#38bdf8' }}>
+                              {form.method}
+                            </span>
+                            <span style={{ fontSize: '11px', color: '#64748b', fontFamily: 'monospace' }}>{form.selector}</span>
+                          </div>
+                          <div style={{ fontSize: '13px', fontFamily: 'monospace', color: '#cbd5e1', marginBottom: '10px' }}>
+                            Action: {form.action}
+                          </div>
+                          <div style={{ borderTop: '1px solid #1e293b', paddingTop: '8px' }}>
+                            <div style={{ fontSize: '11px', color: '#94a3b8', textTransform: 'uppercase', marginBottom: '4px' }}>Form Inputs ({form.inputs.length}):</div>
+                            <div style={{ display: 'flex', flexDirection: 'column', gap: '4px' }}>
+                              {form.inputs.map((inp, iIdx) => (
+                                <div key={iIdx} style={{ fontSize: '12px', color: '#64748b', display: 'flex', gap: '6px' }}>
+                                  <span style={{ color: '#38bdf8' }}>{inp.name}</span>
+                                  <span>({inp.type})</span>
+                                  {inp.required && <span style={{ color: '#ef4444' }}>*required</span>}
+                                </div>
+                              ))}
+                            </div>
+                          </div>
+                        </div>
+                      ))}
+                    </div>
+                  )}
+                </div>
+              </div>
+            ) : (
+              <div style={{ background: '#0f172a', border: '1px solid #1e293b', borderRadius: '12px', padding: '48px 24px', textAlign: 'center' }}>
+                <div style={{ fontSize: '36px', marginBottom: '16px' }}>⚡</div>
+                <h3 style={{ margin: '0 0 8px 0', fontSize: '18px', color: '#f8fafc' }}>
+                  {status === 'running' ? 'Stagehand Browser Agent Executing...' : 'Stagehand Ready to Test'}
+                </h3>
+                <p style={{ margin: '0 0 20px 0', fontSize: '14px', color: '#64748b' }}>
+                  {status === 'running'
+                    ? 'Stagehand is executing goto(), observe(), extract(), and capturing DOM telemetry...'
+                    : 'Click "Test Stagehand Now" to launch Stagehand in headless browser, navigate the page, and inspect everything it observes and extracts.'}
+                </p>
+                {status !== 'running' && (
+                  <button
+                    onClick={() => {
+                      setTargetUrl('http://localhost:4001/test-lab');
+                      handleStartScan('stagehand-only', 'http://localhost:4001/test-lab');
+                    }}
+                    style={{ padding: '10px 24px', background: 'linear-gradient(90deg, #0284c7 0%, #38bdf8 100%)', color: '#ffffff', border: 'none', borderRadius: '8px', fontSize: '14px', fontWeight: 600, cursor: 'pointer' }}
+                  >
+                    ⚡ Test Stagehand Now (Local Lab)
+                  </button>
+                )}
+              </div>
+            )}
+          </div>
+        )}
 
         {/* Tab 1: Overview & Report */}
         {activeTab === 'overview' && (
@@ -558,21 +866,20 @@ ${report.findings
               <div style={{ background: '#0f172a', border: '1px solid #1e293b', borderRadius: '12px', padding: '48px 24px', textAlign: 'center' }}>
                 <div style={{ fontSize: '36px', marginBottom: '16px' }}>🛡️</div>
                 <h3 style={{ margin: '0 0 8px 0', fontSize: '18px', color: '#f8fafc' }}>
-                  {status === 'running' ? 'Autonomous Scan in Progress...' : 'No Scan Results Yet'}
+                  {status === 'running' ? 'Autonomous Scan in Progress...' : 'No Full Audit Report Yet'}
                 </h3>
                 <p style={{ margin: '0 0 20px 0', fontSize: '14px', color: '#64748b' }}>
-                  {status === 'running'
-                    ? 'Stagehand is navigating target routes, discovering forms, and executing vulnerability detectors.'
-                    : 'Enter target URL and launch scan to inspect security posture and get Groq AI remediation.'}
+                  Select "Full Audit" mode and launch scan to inspect security posture, run 5 detectors, and get Groq AI remediation.
                 </p>
-                {status === 'running' && (
-                  <button
-                    onClick={() => setActiveTab('logs')}
-                    style={{ padding: '8px 20px', background: '#1e293b', border: '1px solid #38bdf8', color: '#38bdf8', borderRadius: '6px', fontSize: '13px', cursor: 'pointer' }}
-                  >
-                    View Live Stagehand Console →
-                  </button>
-                )}
+                <button
+                  onClick={() => {
+                    setScanMode('full');
+                    handleStartScan('full');
+                  }}
+                  style={{ padding: '10px 22px', background: 'linear-gradient(90deg, #2563eb 0%, #7c3aed 100%)', color: 'white', border: 'none', borderRadius: '8px', fontSize: '13px', fontWeight: 600, cursor: 'pointer' }}
+                >
+                  🛡️ Run Full Security Audit Mode
+                </button>
               </div>
             )}
           </div>
@@ -581,7 +888,6 @@ ${report.findings
         {/* Tab 2: Vulnerabilities */}
         {activeTab === 'vulns' && (
           <div>
-            {/* Filter controls */}
             <div style={{ display: 'flex', gap: '12px', marginBottom: '16px', flexWrap: 'wrap', alignItems: 'center' }}>
               <div style={{ display: 'flex', alignItems: 'center', gap: '6px', fontSize: '13px', color: '#94a3b8' }}>
                 <span>Severity:</span>
@@ -621,7 +927,9 @@ ${report.findings
 
             {filteredFindings.length === 0 ? (
               <div style={{ background: '#0f172a', border: '1px solid #1e293b', borderRadius: '12px', padding: '40px', textAlign: 'center', color: '#64748b' }}>
-                No findings match the selected filter criteria.
+                {scanMode === 'stagehand-only' 
+                  ? 'Currently in "Only Stagehand" mode. Switch to "Full Audit" mode to run the 5 security detectors and Groq AI.' 
+                  : 'No findings match the selected filter criteria.'}
               </div>
             ) : (
               <div style={{ display: 'flex', flexDirection: 'column', gap: '16px' }}>
@@ -700,14 +1008,17 @@ ${report.findings
         {/* Tab 3: Attack Surfaces */}
         {activeTab === 'surfaces' && (
           <div style={{ background: '#0f172a', border: '1px solid #1e293b', borderRadius: '12px', padding: '24px' }}>
-            <h3 style={{ margin: '0 0 16px 0', fontSize: '18px', color: '#f8fafc' }}>Discovered Routes & Forms</h3>
-            {endpoints.length === 0 && findings.length === 0 ? (
+            <h3 style={{ margin: '0 0 16px 0', fontSize: '18px', color: '#f8fafc' }}>Discovered Routes & Endpoints</h3>
+            {endpoints.length === 0 && !stagehandOutput?.links ? (
               <div style={{ color: '#64748b', textAlign: 'center', padding: '30px' }}>
-                No attack surfaces mapped yet. Run a scan to discover routes dynamically.
+                No attack surfaces mapped yet. Run Stagehand exploration to discover routes dynamically.
               </div>
             ) : (
               <div style={{ display: 'flex', flexDirection: 'column', gap: '10px' }}>
-                {(endpoints.length > 0 ? endpoints : findings.map(f => ({ url: f.url, type: f.type, title: f.parameter || 'Endpoint' }))).map((ep, idx) => (
+                {(endpoints.length > 0 
+                  ? endpoints 
+                  : (stagehandOutput?.links || []).map(l => ({ url: l.href, title: l.text || 'Internal Link', type: 'navigation' }))
+                ).map((ep, idx) => (
                   <div key={idx} style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', padding: '12px 16px', background: '#090d16', border: '1px solid #1e293b', borderRadius: '8px' }}>
                     <div style={{ display: 'flex', alignItems: 'center', gap: '12px' }}>
                       <span style={{ fontSize: '11px', padding: '3px 8px', borderRadius: '4px', background: ep.type === 'auth' ? 'rgba(239, 68, 68, 0.2)' : 'rgba(56, 189, 248, 0.2)', color: ep.type === 'auth' ? '#ef4444' : '#38bdf8', fontWeight: 600 }}>

@@ -347,6 +347,16 @@ export class StagehandAgent {
     return await this.page.content().catch(() => '');
   }
 
+  public async captureScreenshot(): Promise<string> {
+    if (!this.page) return '';
+    try {
+      const buf = await this.page.screenshot({ type: 'jpeg', quality: 75 });
+      return `data:image/jpeg;base64,${buf.toString('base64')}`;
+    } catch {
+      return '';
+    }
+  }
+
   public async close(): Promise<void> {
     this.log('stagehand', 'Closing Stagehand browser session');
     try {
@@ -359,4 +369,3 @@ export class StagehandAgent {
     this.browser = null;
   }
 }
-
